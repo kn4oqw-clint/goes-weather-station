@@ -1,0 +1,95 @@
+# GOES weather-alert notifications — managed by Home Assistant.
+#
+# Data source: emwin_alerts.py (LXC goes-proc) parses NWS VTEC + UGC from the
+# GOES-19 EMWIN text feed, updates sensor.goes_wx_kmob, and fires a
+# `goes_wx_warning` event for every new warning, carrying the affected UGC
+# zone/county codes. This automation owns the notification + geo-targeting.
+#
+# Home = Santa Rosa County, FL -> county UGC FLC113, forecast zone UGC FLZ203.
+#
+# Install:
+#   - rest_command block  -> append under configuration.yaml (top level)
+#   - automation block     -> append to automations.yaml (the !include target)
+
+# ============================ configuration.yaml ============================
+rest_command:
+  # Resolve a lat/lon to its NWS UGC (county + forecast zone) via api.weather.gov.
+  ugc_for_point:
+    url: "https://api.weather.gov/points/{{ lat }},{{ lon }}"
+    method: GET
+    headers:
+      User-Agent: "home-assistant-goes (clintchance@gmail.com)"
+      Accept: "application/geo+json"
+    timeout: 15
+
+# ============================= automations.yaml =============================
+- id: goes_wx_warning_push
+  alias: GOES Weather Warning - Geo-targeted Push
+  description: >-
+    Mobile push for NWS warnings received via GOES-19 EMWIN, geo-filtered by UGC
+    against the home zone (FLC113/FLZ203) and each phone's live location.
+  mode: parallel
+  max: 10
+  triggers:
+    - trigger: event
+      event_type: goes_wx_warning
+  variables:
+    home_ugc:
+      - FLC113
+      - FLZ203
+    alert_ugc: "{{ trigger.event.data.ugc | default([]) }}"
+    ntitle: "{{ trigger.event.data.event }} — NWS Mobile"
+    nmsg: "{{ trigger.event.data.message | default(trigger.event.data.event) }}"
+    nid: "goes_{{ trigger.event.data.office | default('KMOB') }}_{{ trigger.event.data.phen | default('XX') }}_{{ trigger.event.data.etn | default('0') }}"
+    home_hit: "{{ alert_ugc | select('in', home_ugc) | list | count > 0 }}"
+    pix_hit: false
+  actions:
+    # Best-effort: resolve the Pixel's live UGC so a warning where you actually
+    # are (while travelling) still reaches you. Failures must not block the push.
+    - choose:
+        - conditions:
+            - "{{ state_attr('device_tracker.pixel_10_pro', 'latitude') is not none }}"
+          sequence:
+            - continue_on_error: true
+              action: rest_command.ugc_for_point
+              data:
+                lat: "{{ state_attr('device_tracker.pixel_10_pro', 'latitude') }}"
+                lon: "{{ state_attr('device_tracker.pixel_10_pro', 'longitude') }}"
+              response_variable: pix_resp
+            - continue_on_error: true
+              variables:
+                pix_props: "{{ (pix_resp.content if pix_resp.content is mapping else (pix_resp.content | from_json)).properties }}"
+                pix_ugc: >-
+                  {{ [ (pix_props.county | default('')).split('/') | last,
+                       (pix_props.forecastZone | default('')).split('/') | last ]
+                     | reject('eq', '') | list }}
+                pix_hit: "{{ pix_ugc | select('in', alert_ugc) | list | count > 0 }}"
+    # UI log entry (this replaces the persistent_notification the daemon used to send).
+    - action: persistent_notification.create
+      data:
+        notification_id: "{{ nid }}"
+        title: "⚠️ {{ ntitle }}"
+        message: "{{ nmsg }}"
+    # Wife's iPhone: home zone only (no reliable GPS device_tracker).
+    - if:
+        - "{{ home_hit }}"
+      then:
+        - action: notify.mobile_app_iphone
+          data:
+            title: "⚠️ {{ ntitle }}"
+            message: "{{ nmsg }}"
+            data:
+              push:
+                interruption-level: time-sensitive
+    # Your Pixel: home zone OR wherever you currently are.
+    - if:
+        - "{{ home_hit or pix_hit }}"
+      then:
+        - action: notify.mobile_app_pixel_10_pro
+          data:
+            title: "⚠️ {{ ntitle }}"
+            message: "{{ nmsg }}"
+            data:
+              ttl: 0
+              priority: high
+              channel: Weather Warnings

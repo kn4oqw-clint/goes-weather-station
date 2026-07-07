@@ -28,13 +28,20 @@ def _get(url, timeout=25):
 
 def spc_day1_png_url():
     """SPC removed the static day1otlk.gif; the current categorical map is a
-    time-stamped 'print' PNG (day1otlk_<HHMM>_prt.png). Resolve the current
-    issuance time from the index page so we always fetch the latest."""
+    time-stamped 'print' PNG (day1otlk_<HHMM>_prt.png). Resolve the CURRENT
+    issuance from the index page so we always fetch the latest (and so it rolls
+    over to the new day). Prefer the _prt link whose time matches the page's
+    'Valid DDHHMMZ' stamp — this is robust even if the page ever lists archive
+    links alongside the current one (a bare re.search could otherwise stick on
+    a stale, earlier issuance across the day boundary)."""
     try:
         html = _get("https://www.spc.noaa.gov/products/outlook/day1otlk.html").decode("latin-1")
-        m = re.search(r"day1otlk_(\d{4})_prt\.html", html)
-        if m:
-            return f"https://www.spc.noaa.gov/products/outlook/day1otlk_{m.group(1)}_prt.png"
+        times = re.findall(r"day1otlk_(\d{4})_prt\.html", html)
+        if not times:
+            return None
+        valid = re.search(r"Valid\s+\d{2}(\d{4})Z", html)   # DDHHMM -> HHMM of the current outlook
+        hhmm = valid.group(1) if valid and valid.group(1) in times else times[-1]
+        return f"https://www.spc.noaa.gov/products/outlook/day1otlk_{hhmm}_prt.png"
     except Exception as e:
         print("SPC resolve failed", e)
     return None
