@@ -1,0 +1,161 @@
+# Lightning alert automations — GOES-19 GLM proximity
+# ===================================================
+# EXPORTED FROM THE LIVE HOME ASSISTANT (10.10.0.5) — do not hand-edit and
+# expect it to take effect. Round-trip is:
+#     verification/install_lightning.py   repo -> HA
+#     verification/export_automations.py  HA   -> repo
+#
+# Installed 2026-07-27. Consumes entities published by glm_lightning.py on the
+# wxstation Pi; see docs/lightning-glm.md for the data path.
+#
+# POLICY (owner's choice): each person is alerted on their OWN phone when
+# lightning comes within 10 mi of them; a strike near the house notifies the
+# whole household.
+#
+# DEVICE MAP — verified against person.device_trackers, not assumed:
+#     person.clint_chance  -> device_tracker.pixel_10_pro -> notify.mobile_app_pixel_10_pro
+#     person.sierra_chance -> device_tracker.sierra ("iPhone") -> notify.mobile_app_iphone
+#   device_tracker.clint_s_phone and device_tracker.sm_s918u exist but are NOT
+#   linked to any person, so they are deliberately not targeted. `notify.notify`
+#   is avoided for the same reason — it would broadcast to those two as well.
+#
+# WHY THE LEGACY notify.mobile_app_* SERVICE, not notify.send_message:
+#   only it carries the delivery hints that matter for a seek-shelter alert —
+#   Android `importance: high` on its own channel, iOS `interruption-level:
+#   time-sensitive`. Those are what get a 2 a.m. warning past Do Not Disturb and
+#   Doze. `send_message` accepts title/message only.
+#
+# WHY EVERY ALERT TRIGGER HAS `from: "off"`:
+#   the service publishes `unavailable` when the GLM feed goes stale. An
+#   unavailable -> on transition is the feed RECOVERING, not news about the sky.
+#   Without the guard, every ingest hiccup would fire a false lightning alert.
+
+- id: lightning_near_clint
+  alias: Lightning — near Clint
+  description: GLM flash within 10 mi of Clint's tracked position.
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.lightning_clint_chance_lightning_within_10mi
+    from: 'off'
+    to: 'on'
+  actions:
+  - action: notify.mobile_app_pixel_10_pro
+    data:
+      title: ⚡ Lightning {{ states('sensor.lightning_clint_chance_nearest_strike') }} mi away
+      message: '{{ states(''sensor.lightning_clint_chance_strikes_10mi'') }} strikes within 10 mi ({{
+        states(''sensor.lightning_clint_chance_strike_rate'') }}/min, {{ states(''sensor.lightning_clint_chance_trend'')
+        | lower }}). Seek shelter — stay inside 30 min after the last strike.'
+      data:
+        channel: lightning
+        importance: high
+        priority: high
+        ttl: 0
+        notification_icon: mdi:flash-alert
+        color: '#ffb300'
+  mode: single
+- id: lightning_near_sierra
+  alias: Lightning — near Sierra
+  description: GLM flash within 10 mi of Sierra's tracked position.
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.lightning_sierra_chance_lightning_within_10mi
+    from: 'off'
+    to: 'on'
+  actions:
+  - action: notify.mobile_app_iphone
+    data:
+      title: ⚡ Lightning {{ states('sensor.lightning_sierra_chance_nearest_strike') }} mi away
+      message: '{{ states(''sensor.lightning_sierra_chance_strikes_10mi'') }} strikes within 10 mi ({{
+        states(''sensor.lightning_sierra_chance_strike_rate'') }}/min, {{ states(''sensor.lightning_sierra_chance_trend'')
+        | lower }}). Seek shelter — stay inside 30 min after the last strike.'
+      data:
+        push:
+          interruption-level: time-sensitive
+          sound: default
+  mode: single
+- id: lightning_near_home
+  alias: Lightning — near Home
+  description: GLM flash within 10 mi of the station. Whole household.
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.lightning_home_lightning_within_10mi
+    from: 'off'
+    to: 'on'
+  actions:
+  - action: notify.mobile_app_pixel_10_pro
+    data:
+      title: ⚡ Lightning near the house — {{ states('sensor.lightning_home_nearest_strike') }} mi away
+      message: '{{ states(''sensor.lightning_home_strikes_10mi'') }} strikes within 10 mi ({{ states(''sensor.lightning_home_strike_rate'')
+        }}/min, {{ states(''sensor.lightning_home_trend'') | lower }}). Seek shelter — stay inside 30
+        min after the last strike.'
+      data:
+        channel: lightning
+        importance: high
+        priority: high
+        ttl: 0
+        notification_icon: mdi:flash-alert
+        color: '#ffb300'
+  - action: notify.mobile_app_iphone
+    data:
+      title: ⚡ Lightning near the house — {{ states('sensor.lightning_home_nearest_strike') }} mi away
+      message: '{{ states(''sensor.lightning_home_strikes_10mi'') }} strikes within 10 mi ({{ states(''sensor.lightning_home_strike_rate'')
+        }}/min, {{ states(''sensor.lightning_home_trend'') | lower }}). Seek shelter — stay inside 30
+        min after the last strike.'
+      data:
+        push:
+          interruption-level: time-sensitive
+          sound: default
+  - action: persistent_notification.create
+    data:
+      notification_id: lightning_home
+      title: ⚡ Lightning near the house
+      message: '{{ states(''sensor.lightning_home_strikes_10mi'') }} strikes within 10 mi ({{ states(''sensor.lightning_home_strike_rate'')
+        }}/min, {{ states(''sensor.lightning_home_trend'') | lower }}). Seek shelter — stay inside 30
+        min after the last strike.'
+  mode: single
+- id: lightning_all_clear_home
+  alias: Lightning — all clear (home)
+  description: Fires 30 min after the last strike inside 10 mi of the house.
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.lightning_home_lightning_within_10mi
+    from: 'on'
+    to: 'off'
+    for: 00:30:00
+  actions:
+  - action: notify.mobile_app_pixel_10_pro
+    data:
+      title: ✅ Lightning all clear
+      message: No strikes within 10 mi for 30 minutes. Safe to head back outside.
+      data:
+        channel: lightning
+  - action: notify.mobile_app_iphone
+    data:
+      title: ✅ Lightning all clear
+      message: No strikes within 10 mi for 30 minutes. Safe to head back outside.
+  - action: persistent_notification.dismiss
+    data:
+      notification_id: lightning_home
+  mode: single
+- id: lightning_feed_stale
+  alias: Lightning — GLM feed unavailable
+  description: GLM ingest stale; lightning data is NOT trustworthy.
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.lightning_home_lightning_within_10mi
+    to: unavailable
+    for: 00:10:00
+  actions:
+  - action: notify.mobile_app_pixel_10_pro
+    data:
+      title: ⚠️ Lightning feed down
+      message: GLM data is stale — lightning detection is offline. Do not treat "no strikes" as safe.
+      data:
+        channel: lightning
+  - action: persistent_notification.create
+    data:
+      notification_id: lightning_feed_stale
+      title: ⚠️ Lightning feed down
+      message: GLM ingest is stale. Check glm-lightning.service on the wxstation Pi (10.10.0.171) and
+        wxalerts-glm-ingest on 172.16.50.211.
+  mode: single

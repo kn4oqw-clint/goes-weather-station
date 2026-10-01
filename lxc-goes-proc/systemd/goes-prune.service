@@ -2,5 +2,10 @@
 Description=Prune local GOES products older than 24h (kept only for loop cache)
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/find /srv/goes -type f -mmin +1440 -delete
-ExecStartPost=/usr/bin/find /srv/goes -type d -empty -delete
+# Prune the PRODUCT trees by name, never /srv/goes wholesale. The served map is
+# rooted in /srv/goes/loop and includes static assets that are written once and
+# never touched again -- map.html, vendor/leaflet, basemap.json, ugc.json. A
+# blanket "find /srv/goes -mmin +1440 -delete" silently deleted all of them a day
+# after deploy, taking the map down with no error anywhere.
+ExecStart=/bin/sh -c 'for d in /srv/goes/goes19 /srv/goes/raw /srv/goes/emwin /srv/goes/text; do [ -d "$d" ] && find "$d" -type f -mmin +1440 -delete; done; exit 0'
+ExecStartPost=/bin/sh -c 'for d in /srv/goes/goes19 /srv/goes/raw /srv/goes/emwin /srv/goes/text; do [ -d "$d" ] && find "$d" -mindepth 1 -type d -empty -delete; done; exit 0'

@@ -1,0 +1,20 @@
+boto3==1.35.*
+redis==5.2.*
+prometheus_client==0.21.*
+psycopg2-binary==2.9.*
+xradar==0.12.*
+zarr>=3.0
+xarray>=2025.1
+numpy<3
+scipy
+shapely>=2.0
+scikit-image>=0.24
+pyproj>=3.6
+# --- storm identification + tracking -------------------------------------
+# tobac supplies BOTH halves of SCIT: feature_detection_multithreshold
+# implements the Johnson et al. (1998) nested-threshold supersede rule, and
+# linking_trackpy + merge_split_MEST give split/merge-aware tracking. It pulls
+# a large dependency set (iris, cartopy, matplotlib, dask, numba) -- ~1.2 GB --
+# which is accepted: the single-threshold detector it replaces could not
+# resolve cores embedded in a squall line at all.
+tobac==1.6.3

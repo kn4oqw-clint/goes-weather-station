@@ -1,0 +1,7 @@
+[Unit]
+Description=Watchdog: restart goesproc on a dead packet stream + notify Home Assistant
+After=goesproc.service
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/goes/ha.env
+ExecStart=/opt/goesproc-watchdog.py

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>GOES-19 Band 13 — Gulf Coast</title>
+<!-- Everything is served from this host. No CDN, no tile server, no font CDN:
+     the page must work with the internet down, which is the whole point. The
+     "basemap" is Natural Earth vectors drawn by Leaflet, not raster tiles. -->
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<script src="vendor/leaflet/leaflet.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#0b0f14;color:#e8eef5;
+            font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  #map{position:absolute;inset:0;background:#0b0f14}
+  .leaflet-container{background:#0b0f14}
+  .panel{position:absolute;z-index:800;background:rgba(12,17,23,.86);
+         border:1px solid #263241;border-radius:8px;padding:8px 10px;backdrop-filter:blur(3px)}
+  #ctl{left:10px;bottom:10px;min-width:280px}
+  #ctl .row{display:flex;align-items:center;gap:8px;margin:4px 0}
+  #ctl button{background:#1b2733;color:#e8eef5;border:1px solid #33445a;border-radius:5px;
+              padding:3px 9px;font-size:14px;cursor:pointer;min-width:34px}
+  #ctl button:hover{background:#24344a}
+  #ctl input[type=range]{flex:1;min-width:90px;accent-color:#4da3ff}
+  #stamp{font-weight:600;letter-spacing:.2px}
+  #legend{right:10px;bottom:10px;text-align:center}
+  #legend .bar{height:10px;width:210px;border:1px solid #33445a;border-radius:2px}
+  #legend .lab{display:flex;justify-content:space-between;font-size:10px;color:#9fb2c6;margin-top:3px}
+  #alerts{right:10px;top:10px;max-width:290px;max-height:44vh;overflow:auto}
+  #alerts h4{margin:0 0 5px;font-size:12px;color:#9fb2c6;font-weight:600;text-transform:uppercase;
+             letter-spacing:.6px}
+  .al{display:flex;gap:7px;align-items:baseline;margin:3px 0;cursor:pointer}
+  .al .sw{width:9px;height:9px;border-radius:2px;flex:none;margin-top:3px}
+  .al .x{font-size:11px;color:#9fb2c6}
+  /* left:54px clears Leaflet's zoom control, which lives at left:10 and is 34px wide */
+  #status{left:54px;top:10px;font-size:11px;color:#9fb2c6}
+  .stale{color:#ffb454}
+  .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#131c26;color:#e8eef5}
+  .leaflet-popup-content{margin:9px 11px;font-size:12px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="status" class="panel">loading…</div>
+<div id="alerts" class="panel" hidden><h4>Active alerts</h4><div id="allist"></div></div>
+<div id="ctl" class="panel">
+  <div class="row"><span id="stamp">—</span></div>
+  <div class="row">
+    <button id="play" title="Play/pause">▶</button>
+    <input id="seek" type="range" min="0" max="0" value="0" step="1">
+    <span id="idx" style="min-width:44px;text-align:right;color:#9fb2c6"></span>
+  </div>
+  <div class="row"><span style="color:#9fb2c6">IR</span>
+    <input id="opa" type="range" min="0" max="100" value="85"></div>
+</div>
+<div id="legend" class="panel">
+  <div class="bar" id="lbar"></div>
+  <div class="lab" id="llab"></div>
+</div>
+<script>
+"use strict";
+const REFRESH_MS = 30000;      // how often we re-check for a newer loop / alerts
+const FRAME_MS   = 450;
+
+// maxZoom 18: with no tile layer there is nothing to derive a limit from, so set
+// it explicitly. The IR overlay is 900px across 16.8 deg (~2 km/px native), so
+// past roughly z9 it is upsampled and gets soft -- but the vector layers
+// (coastlines, county lines, alert polygons) stay sharp at any zoom, which is
+// the point of zooming in on a warning polygon.
+const map = L.map("map", {zoomControl:true, attributionControl:false,
+                          preferCanvas:true, zoomSnap:0.25, maxZoom:18});
+const paneOrder = {basemap:410, ir:420, vector:430};
+for (const [n,z] of Object.entries(paneOrder)) { map.createPane(n); map.getPane(n).style.zIndex = z; }
+
+let frames=[], idx=0, timer=null, playing=true, overlay=null, bounds=null;
+let alertLayer=L.layerGroup([]).addTo(map), homeMarker=null, ugcShapes=null, ugcPending=false;
+
+const $ = s => document.querySelector(s);
+const setStatus = (t,stale) => { const e=$("#status"); e.textContent=t; e.className="panel"+(stale?" stale":""); };
+
+// ---------------------------------------------------------------- basemap
+fetch("basemap.json").then(r=>r.json()).then(b=>{
+  const mk=(rings,style)=>rings.forEach(r=>L.polyline(r.map(p=>[p[1],p[0]]),
+      Object.assign({pane:"basemap",interactive:false},style)).addTo(map));
+  mk(b.states   ,{color:"#4a5a6e",weight:1});
+  mk(b.countries,{color:"#8ea4bd",weight:1.2});
+}).catch(e=>console.warn("basemap",e));
+
+// ---------------------------------------------------------------- legend
+function paletteCss(p){
+  // Rebuild the exact ramp make_loop.py used, warm(left) -> cold(right).
+  const [wWarm,wCold,gLo,gHi]=p.grey, cold=p.colour;
+  const tMin=cold[cold.length-1][0], stops=[];
+  const pos=t=>(wWarm-t)/(wWarm-tMin)*100;
+  stops.push(`rgb(${gLo},${gLo},${gLo}) 0%`);
+  stops.push(`rgb(${gHi},${gHi},${gHi}) ${pos(wCold).toFixed(1)}%`);
+  cold.forEach(([t,c])=>stops.push(`rgb(${c[0]},${c[1]},${c[2]}) ${pos(t).toFixed(1)}%`));
+  return {css:`linear-gradient(90deg,${stops.join(",")})`, warm:wWarm, cold:tMin};
+}
+function drawLegend(p){
+  const g=paletteCss(p);
+  $("#lbar").style.background=g.css;
+  $("#llab").innerHTML=`<span>${g.warm}°C</span><span>cloud-top temp</span><span>${g.cold}°C</span>`;
+}
+
+// ---------------------------------------------------------------- frames
+function showFrame(i){
+  if(!frames.length) return;
+  idx=(i+frames.length)%frames.length;
+  const f=frames[idx];
+  overlay.setUrl(f.file);
+  $("#stamp").textContent=(f.local||"")+"   ·   "+(f.utc||"");
+  $("#seek").value=idx; $("#idx").textContent=(idx+1)+"/"+frames.length;
+}
+function tick(){ if(playing) showFrame(idx+1); }
+function setPlaying(p){ playing=p; $("#play").textContent=p?"❚❚":"▶"; }
+
+async function loadFrames(){
+  const m=await (await fetch("frames.json?_="+Date.now())).json();
+  if(m.palette) drawLegend(m.palette);
+  bounds=L.latLngBounds(m.bounds[0],m.bounds[1]);
+  const sameSet = frames.length===m.frames.length &&
+                  frames.length && frames[frames.length-1].utc===m.frames[m.frames.length-1].utc;
+  frames=m.frames;
+  if(!overlay){
+    overlay=L.imageOverlay(frames[0].file,bounds,{opacity:$("#opa").value/100,pane:"ir"}).addTo(map);
+    // Imagery covers CONUS; open on the local box so home is not a few pixels.
+    map.fitBounds(m.home_view?L.latLngBounds(m.home_view[0],m.home_view[1]):bounds);
+    if(m.home) homeMarker=L.circleMarker([m.home[0],m.home[1]],
+        {pane:"vector",radius:5,color:"#000",weight:3,fillColor:"#fff",fillOpacity:1})
+        .addTo(map).bindPopup("Home");
+  }
+  overlay.setBounds(bounds);
+  $("#seek").max=Math.max(0,frames.length-1);
+  frames.forEach(f=>{const im=new Image(); im.src=f.file;});   // preload; avoids flicker
+  if(!sameSet) showFrame(frames.length-1);
+  return frames.length;
+}
+
+// ---------------------------------------------------------------- alerts
+// Warnings are drawn from the polygon that came down over the dish. Zone-based
+// products (watches/advisories) have no polygon, so we join their UGC codes
+// against the seeded ugc.json -- fetched lazily, since it is ~2.6 MB and most of
+// the time there is nothing to draw.
+const STYLES={
+  "TO.W":{c:"#ff2d2d",n:"Tornado Warning"},   "SV.W":{c:"#ffb400",n:"Severe T-Storm Warning"},
+  "FF.W":{c:"#39d353",n:"Flash Flood Warning"},"FA.W":{c:"#39d353",n:"Flood Warning"},
+  "EW.W":{c:"#ff2d2d",n:"Extreme Wind"},       "SM.W":{c:"#ff8ad8",n:"Special Marine"},
+  "TO.A":{c:"#ff6b6b",n:"Tornado Watch"},      "SV.A":{c:"#ffd479",n:"Severe T-Storm Watch"}
+};
+const styleFor=a=>STYLES[a.phen+"."+a.sig]||{c:"#4da3ff",n:a.name};
+
+async function ensureUgc(){
+  if(ugcShapes||ugcPending) return ugcShapes;
+  ugcPending=true;
+  try{ ugcShapes=await (await fetch("ugc.json")).json(); }
+  catch(e){ console.warn("ugc.json unavailable",e); ugcShapes={}; }
+  ugcPending=false; return ugcShapes;
+}
+function destPoint(lat,lon,headingDeg,km){
+  const r=headingDeg*Math.PI/180;
+  return [lat + (km/111.32)*Math.cos(r),
+          lon + (km/(111.32*Math.cos(lat*Math.PI/180)))*Math.sin(r)];
+}
+async function drawAlerts(doc){
+  alertLayer.clearLayers();
+  const list=$("#allist"); list.innerHTML="";
+  const alerts=doc.alerts||[];
+  $("#alerts").hidden = alerts.length===0;
+  if(!alerts.length) return;
+  if(alerts.some(a=>!a.poly && (a.ugc||[]).length)) await ensureUgc();
+
+  alerts.forEach(a=>{
+    const st=styleFor(a), warn=a.sig==="W";
+    const shapes=[];
+    if(a.poly && a.poly.length>2){
+      shapes.push(a.poly.map(p=>[p[1],p[0]]));
+    } else if(ugcShapes){
+      (a.ugc||[]).forEach(u=>(ugcShapes[u]||[]).forEach(r=>shapes.push(r.map(p=>[p[1],p[0]]))));
+    }
+    const grp=[];
+    shapes.forEach(s=>grp.push(L.polygon(s,{pane:"vector",color:st.c,weight:warn?2.5:2,
+        opacity:.95,fillColor:st.c,fillOpacity:warn?.18:.10,
+        dashArray:warn?null:"6 5"}).addTo(alertLayer)));
+    if(a.motion&&a.motion.loc&&a.motion.kt){
+      const [lon,lat]=a.motion.loc, km=a.motion.kt*1.852*0.5;   // 30 min of travel
+      const to=destPoint(lat,lon,a.motion.heading,km);
+      L.polyline([[lat,lon],to],{pane:"vector",color:st.c,weight:2,dashArray:"3 4"}).addTo(alertLayer);
+      L.circleMarker([lat,lon],{pane:"vector",radius:3,color:st.c,fillColor:st.c,
+                                fillOpacity:1,weight:1}).addTo(alertLayer);
+    }
+    const pop=`<b>${a.name}</b>${a.etn?` <span style="opacity:.6">#${a.etn}</span>`:""}<br>`+
+              `until ${a.expires_local||a.expires}`+
+              (a.motion&&a.motion.kt?`<br>moving ${a.motion.heading}° at ${a.motion.kt} kt`:"")+
+              (!a.poly&&(a.ugc||[]).length?`<br><span style="opacity:.6">zones: ${a.ugc.join(", ")}</span>`:"");
+    grp.forEach(g=>g.bindPopup(pop));
+
+    const row=document.createElement("div"); row.className="al";
+    row.innerHTML=`<span class="sw" style="background:${st.c}"></span>`+
+                  `<span>${a.name}<br><span class="x">until ${a.expires_local||""}</span></span>`;
+    row.onclick=()=>{ if(grp.length) map.fitBounds(grp[0].getBounds().pad(0.6)); };
+    list.appendChild(row);
+  });
+}
+
+// ---------------------------------------------------------------- refresh
+async function refresh(){
+  let n=0, err=[];
+  try{ n=await loadFrames(); }catch(e){ err.push("imagery"); }
+  try{ await drawAlerts(await (await fetch("alerts.json?_="+Date.now())).json()); }
+  catch(e){ err.push("alerts"); }
+  const last=frames.length?frames[frames.length-1].utc:null;
+  let stale=false, msg;
+  if(err.length){ msg="offline: "+err.join(" + ")+" unavailable"; stale=true; }
+  else{
+    const age=last?(Date.now()-Date.parse(last))/60000:1e9;
+    // GOES-19 HRIT full disk actually arrives every 30 min (verified 00:00:21Z,
+    // 00:30:21Z, all channels), and goesproc needs ~16 min to assemble a frame.
+    // So the newest frame is legitimately up to ~46 min old right before the next
+    // one lands. Anything under that would flag stale on every single cycle.
+    stale=age>75;
+    msg=`GOES-19 Band 13 · ${n} frames · newest ${age<1?"just now":Math.round(age)+" min old"}`;
+  }
+  setStatus(msg,stale);
+}
+
+$("#play").onclick=()=>setPlaying(!playing);
+$("#seek").oninput=e=>{ setPlaying(false); showFrame(+e.target.value); };
+$("#opa").oninput=e=>{ if(overlay) overlay.setOpacity(e.target.value/100); };
+document.addEventListener("keydown",e=>{
+  if(e.key===" "){e.preventDefault();setPlaying(!playing);}
+  if(e.key==="ArrowLeft"){setPlaying(false);showFrame(idx-1);}
+  if(e.key==="ArrowRight"){setPlaying(false);showFrame(idx+1);}
+});
+
+setPlaying(true);
+refresh().catch(e=>setStatus("failed to load: "+e,true));
+timer=setInterval(tick,FRAME_MS);
+setInterval(refresh,REFRESH_MS);
+</script>
+</body>
+</html>

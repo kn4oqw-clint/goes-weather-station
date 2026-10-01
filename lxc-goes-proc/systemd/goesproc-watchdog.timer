@@ -1,0 +1,8 @@
+[Unit]
+Description=Run goesproc packet-stream watchdog every 2 min
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+AccuracySec=20s
+[Install]
+WantedBy=timers.target

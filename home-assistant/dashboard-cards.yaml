@@ -9,6 +9,25 @@ name: GOES-19 Infrared — Gulf Coast (3h loop)
 show_state: false
 camera_view: auto
 
+# --- Interactive Leaflet map (IR overlay + NWS alert polygons) ---
+# Served by goes-web on the LXC. Fully offline: Leaflet is vendored locally, the
+# "basemap" is Natural Earth vectors (no tile server), the IR frames are Web
+# Mercator PNGs from make_loop.py, and warning polygons come off the dish in the
+# EMWIN text itself. Added ALONGSIDE the camera card above, which still works.
+#
+# MUST be https and same-origin. HA is fronted by NPMplus at
+# https://home.thechance.family (http 301s to https), so an
+# http://10.10.0.11:8099 iframe is blocked as mixed content and renders blank.
+# It is exposed instead as a /goesmap location on that same proxy host, which
+# also satisfies the host's npmplus_x_frame_options=SAMEORIGIN.
+# NOTE: that hostname resolves internally only (172.16.50.136) and does not work
+# outside the house -- the map is LAN-only, same as HA itself.
+type: iframe
+url: https://home.thechance.family/goesmap/map.html
+grid_options:
+  columns: 36
+  rows: 10
+
 # --- Alert list (markdown; renders "no active alerts" when quiet) ---
 type: markdown
 content: >
@@ -29,6 +48,49 @@ content: >
 # camera.wx_surface   Surface Analysis & Fronts
 # camera.wx_radar     National Radar / QPF
 # Each is a picture-entity card in its own section; populated by emwin_graphics.py.
+
+# =====================================================================
+# Weather Station dashboard (url_path: weather-station) — rebuilt 2026-07-26
+# =====================================================================
+# Views: Now / Trends / Graphics. Edited live via the WebSocket API
+# (lovelace/config/save), NOT by hand-editing .storage.
+#
+# The STM32 "TEMPEST node" was retired; every
+# sensor.weather_station_node_bme680_as3935_* card is GONE. Its BME680 role is
+# now filled by the Pi's own I2C sensor, and all computed values come from a
+# dedicated derived-metrics device.
+#
+# Devices feeding this dashboard:
+#   Weather Station (Acurite 5-in-1)  sensor.weather_station_acurite_5_in_1_*
+#     -> temp, humidity, wind, rain, daily hi/lo, RSSI, battery
+#        THIS is the sited outdoor sensor: temp/RH come from here, never BME680
+#   Weather Station (BME680)          sensor.weather_station_bme680_*
+#     -> station_pressure, temperature, humidity, gas_resistance
+#        Indoors. Pressure ONLY — its temp/RH are enclosure readings.
+#   Weather Station (Derived)         sensor.weather_station_derived_*
+#     -> feels_like, heat_index, humidex, wind_chill, dew_point, wet_bulb,
+#        frost_point, comfort_level, absolute_humidity, vapor_pressure,
+#        saturation_vapor_pressure, vapor_pressure_deficit,
+#        sea_level_pressure, altimeter_setting, pressure_trend_3h,
+#        pressure_tendency, air_density, density_altitude,
+#        estimated_cloud_base, wind_speed_mph, wind_gust_mph, beaufort_force,
+#        wind_direction_cardinal, rain_rate, rain_1h, rain_24h, rain_today
+#
+# "Now" sections:  NWS Alerts | GOES CH13 Loop | Outdoor (Acurite) |
+#                  Comfort & Feels Like | Pressure | Air & Moisture (BME680) |
+#                  Rain | Wind (windrose + derived glance)
+# "Trends":        Temperature (+ feels_like/heat_index/dew_point/wet_bulb) |
+#                  Wind & Pressure (derived MSLP + 3h tendency) |
+#                  Air Quality & Rain (gas resistance, VPD, rain rate)
+#
+# UNIT GOTCHA: HA's unit system here is imperial. A `pressure` device_class is
+# converted to **psi**, which rendered vapour pressure as "0.61 psi" and VPD as
+# "0.14 psi" — useless. Those three sensors therefore carry NO device_class so
+# they stay in hPa/kPa. `atmospheric_pressure` converts to inHg, which is
+# correct and wanted for station/sea-level pressure and altimeter setting.
+#
+# frost_point and wind_chill read "unknown" whenever they are not physically
+# applicable (warm weather). That is intended, not a fault.
 
 # --- FINAL "Graphics" tab tiles (EMWIN product -> camera) ---
 #   camera.wx_spc_outlook  MODDY1US  SPC Day 1 Convective Outlook
